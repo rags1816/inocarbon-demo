@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>i-NoCarbon Freemium — Demo</title>
+<meta name="description" content="Free carbon & cost calculator for households, small businesses and restaurants.">
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: Roboto, Arial, sans-serif;
+  background: #1B5E20;
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+.card {
+  background: white;
+  border-radius: 16px;
+  padding: 36px 32px;
+  max-width: 440px;
+  width: 100%;
+  text-align: center;
+  box-shadow: 0 8px 40px rgba(0,0,0,0.3);
+}
+.logo {
+  width: 80px;
+  height: 80px;
+  border-radius: 50%;
+  border: 3px solid #E8F5E9;
+  margin: 0 auto 16px;
+  overflow: hidden;
+  box-shadow: 0 2px 12px rgba(0,0,0,0.15);
+}
+h1 {
+  font-size: 24px;
+  font-weight: 700;
+  color: #1B5E20;
+  margin-bottom: 4px;
+}
+h1 span { font-weight: 300; color: #2E7D32; }
+.tagline {
+  font-size: 12px;
+  color: #757575;
+  font-style: italic;
+  margin-bottom: 20px;
+}
+.badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: center;
+  margin-bottom: 24px;
+}
+.badge {
+  background: #E8F5E9;
+  color: #2E7D32;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 12px;
+  border: 1px solid #C8E6C9;
+}
+.enter-btn {
+  display: block;
+  width: 100%;
+  padding: 16px;
+  background: #2E7D32;
+  color: white;
+  font-size: 16px;
+  font-weight: 700;
+  border: none;
+  border-radius: 10px;
+  cursor: pointer;
+  text-decoration: none;
+  margin-bottom: 16px;
+  transition: background 0.2s;
+  font-family: inherit;
+}
+.enter-btn:hover { background: #1B5E20; }
+.notice {
+  background: #FFF8E1;
+  border: 1px solid #FFE082;
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin-bottom: 16px;
+  text-align: left;
+}
+.notice-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: #F57F17;
+  margin-bottom: 6px;
+}
+.notice-text {
+  font-size: 11px;
+  color: #5D4037;
+  line-height: 1.7;
+}
+.notice-text strong { color: #E65100; }
+.footer {
+  font-size: 10px;
+  color: #BDBDBD;
+  line-height: 1.6;
+  margin-top: 4px;
+}
+.footer a { color: #BDBDBD; }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="logo"><img src="icon-192.png" alt="i-NoCarbon" width="80" height="80" style="display:block;width:100%;height:100%;object-fit:cover"></div>
+  <h1>i-NoCarbon <span>Freemium</span></h1>
+  <p class="tagline">Change Today for a Better Tomorrow!</p>
+
+  <div class="badges">
+    <span class="badge">⚡ Energy</span>
+    <span class="badge">🚗 Transport</span>
+    <span class="badge">🍽️ Food</span>
+    <span class="badge">💷 Costs</span>
+    <span class="badge">📉 Scenarios</span>
+    <span class="badge">✅ DESNZ 2025</span>
+  </div>
+
+  <a id="demo-btn" class="enter-btn" href="#" target="_blank">
+    🚀 Enter the Demo →
+  </a>
+
+  <div class="notice">
+    <div class="notice-title">⚠️ First-time visitors — one quick step</div>
+    <div class="notice-text">
+      You may see a screen saying <strong>"You are about to visit..."</strong><br>
+      This is a standard notice for our secure demo server.<br>
+      Simply click the <strong>Visit Site</strong> button to continue.<br>
+      You will only see this once.
+    </div>
+  </div>
+
+  <div class="footer">
+    🔒 No account required · No data stored · GDPR compliant<br>
+    Free carbon &amp; cost calculator · <a href="https://i-nocarbon.com" target="_blank">i-nocarbon.com</a>
+  </div>
+</div>
+
+<script>
+  // ── CHANGE THIS URL each demo session to your current ngrok URL ──
+  var DEMO_URL = 'https://maker-suffering-palm.ngrok-free.dev?ngrok-skip-browser-warning=true';
+  // ────────────────────────────────────────────────────────────────
+
+  document.getElementById('demo-btn').href = DEMO_URL;
+</script>
+</body>
+</html>
