@@ -2,14 +2,16 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta http-equiv="refresh" content="0; url=https://quick-exhaust-href-offline.trycloudflare.com">
   <title>i-NoCarbon — Redirecting...</title>
 </head>
 <body>
   <script>
-    const DEMO_URL = "https://housing-exhibition-chat-counters.trycloudflare.com";
+    const DEMO_URL = "https://YOUR-CURRENT-TUNNEL-URL.trycloudflare.com";
     window.location.replace(DEMO_URL);
   </script>
-  <p>Redirecting... <a href="https://quick-exhaust-href-offline.trycloudflare.com">Click here if not redirected</a></p>
+  <p>Redirecting... <a id="fallback-link" href="#">Click here if not redirected</a></p>
+  <script>
+    document.getElementById('fallback-link').href = DEMO_URL;
+  </script>
 </body>
 </html>
