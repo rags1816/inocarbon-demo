@@ -1,17 +1,17 @@
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
-  <meta charset="UTF-8">
-  <title>i-NoCarbon — Redirecting...</title>
+  <meta charset="utf-8">
+  <title>i-NoCarbon Demo</title>
 </head>
-<body>
+<body style="font-family:sans-serif;text-align:center;padding-top:60px;background:#1B5E20;color:#fff">
   <script>
-    const DEMO_URL = "https://thu-individuals-recommends-char.trycloudflare.com";
+    // ── Update this ONE line each demo session with the fresh tunnel URL ──
+    var DEMO_URL = "https://thu-individuals-recommends-char.trycloudflare.com";
     window.location.replace(DEMO_URL);
   </script>
-  <p>Redirecting... <a id="fallback-link" href="#">Click here if not redirected</a></p>
-  <script>
-    document.getElementById('fallback-link').href = DEMO_URL;
-  </script>
+  <p>🌱 Redirecting to the i-NoCarbon demo…</p>
+  <p style="font-size:12px;opacity:.8">If nothing happens, <a id="lnk" style="color:#A5D6A7" href="#">tap here</a>.</p>
+  <script>document.getElementById('lnk').href = DEMO_URL;</script>
 </body>
 </html>
