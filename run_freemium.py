@@ -16,8 +16,14 @@ from shared.emission_factors import get_factor, FACTORS_BY_KEY
 from shared.benchmarks       import (UK_MONTHLY_AVERAGE_KG, UK_ANNUAL_AVERAGE_KG,
                                      UK_MONTHLY_BY_CATEGORY, get_comparison_band)
 
+from werkzeug.middleware.proxy_fix import ProxyFix
 app = Flask(__name__, template_folder='templates', static_folder='static')
 app.secret_key = os.environ.get('FREEMIUM_SECRET', 'freemium-dev-key')
+app.config['SESSION_COOKIE_SECURE']   = False
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['PREFERRED_URL_SCHEME']    = 'https'
+app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
 port = int(os.environ.get('FREEMIUM_PORT', 5002))   # module-level: needed by /api/admin/stats regardless of launch method (gunicorn, direct run, etc.)
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -260,6 +266,20 @@ def pin_entry():
             session['demo_pin'] = pin
             session['role']     = 'user'
             session.modified    = True
+            # Log session
+            try:
+                import hashlib
+                pin_h = hashlib.sha256(pin.encode()).hexdigest()[:16]
+                db = sqlite3.connect(DB_PATH)
+                db.execute(
+                    "INSERT INTO session_log (pin_hash, ip_addr, user_agent) VALUES (?,?,?)",
+                    (pin_h,
+                     request.headers.get('X-Forwarded-For', request.remote_addr or '')[:60],
+                     request.headers.get('User-Agent', '')[:200])
+                )
+                db.commit(); db.close()
+            except Exception:
+                pass
             return redirect('/')
         err = "<div class='err'>PIN not recognised. Check with the demo host.</div>"
     else:
@@ -369,6 +389,7 @@ def no_cache(response):
     response.headers['Pragma']        = 'no-cache'
     response.headers['Expires']       = '0'
     response.headers['ngrok-skip-browser-warning'] = 'true'  # suppress ngrok interstitial page
+    response.headers['Access-Control-Allow-Credentials'] = 'true'
     return response
 
 # ── UK Prices ──────────────────────────────────────────────────────────────
@@ -424,6 +445,40 @@ def get_hotel_ef_uk_average():
         except ValueError: pass
     return HOTEL_EF['uk_average']
 
+# ── WFH homeworking factor (Method A — official UK DESNZ approach) ──────────
+# The DESNZ/DEFRA "Homeworking (office equipment + heating)" conversion factor
+# is expressed in kg CO2e per FTE per WORKING HOUR. Published in the annual
+# Government conversion factors for company reporting:
+#   https://www.gov.uk/government/collections/government-conversion-factors-for-company-reporting
+# It estimates ONLY the incremental emissions of working at home (extra
+# heating + office-equipment electricity, from ONS time-use data) — it is NOT
+# a share of the whole household bill.
+# ⚠️ The defaults below are PLACEHOLDERS — the admin must verify the current
+# DESNZ figure and save the real value via the Admin Panel (persisted to .env)
+# before client use. Annual FTE hours default: 37.5 h/week × ~46.4 working
+# weeks (52 weeks minus ~5.6 weeks statutory leave incl. bank holidays) ≈ 1740.
+WFH_FACTOR_DEFAULT_KG_FTE_HOUR = 0.334
+WFH_HOURS_DEFAULT_PER_FTE_YEAR = 1740.0
+
+def get_wfh_factor_kg_fte_hour():
+    raw = os.environ.get('WFH_FACTOR_KG_PER_FTE_HOUR', '').strip()
+    if raw:
+        try: return float(raw)
+        except ValueError: pass
+    return WFH_FACTOR_DEFAULT_KG_FTE_HOUR
+
+def get_wfh_hours_per_fte_year():
+    raw = os.environ.get('WFH_HOURS_PER_FTE_YEAR', '').strip()
+    if raw:
+        try: return float(raw)
+        except ValueError: pass
+    return WFH_HOURS_DEFAULT_PER_FTE_YEAR
+
+def is_wfh_factor_verified():
+    """True once the admin has explicitly saved a WFH factor (env var set);
+    False means the built-in placeholder is still in use."""
+    return bool(os.environ.get('WFH_FACTOR_KG_PER_FTE_HOUR', '').strip())
+
 def save_source_data(values: dict):
     """Persist admin-edited pricing/source values to .env. Any key not
     supplied is left unchanged. Always stamps PRICE_UPDATED_DATE."""
@@ -437,6 +492,16 @@ def save_source_data(values: dict):
     if values.get('hotel_ef_uk_average') not in (None, ''):
         try:
             _save_env_var('HOTEL_EF_UK_AVERAGE', str(float(values['hotel_ef_uk_average'])))
+        except (TypeError, ValueError):
+            pass
+    if values.get('wfh_factor_kg_fte_hour') not in (None, ''):
+        try:
+            _save_env_var('WFH_FACTOR_KG_PER_FTE_HOUR', str(float(values['wfh_factor_kg_fte_hour'])))
+        except (TypeError, ValueError):
+            pass
+    if values.get('wfh_hours_per_fte_year') not in (None, ''):
+        try:
+            _save_env_var('WFH_HOURS_PER_FTE_YEAR', str(float(values['wfh_hours_per_fte_year'])))
         except (TypeError, ValueError):
             pass
     if values.get('price_source_label'):
@@ -553,7 +618,7 @@ FOOD_TOOLTIPS = {
     "food_fish":    "Similar to chicken. Includes all seafood.",
     "food_milk":    "Measured per litre. Includes milk in tea, coffee, cereal.",
     "food_cheese":  "Higher impact than milk — takes ~10 litres of milk to make 1 kg of cheese.",
-    "food_eggs":    "Moderate impact. Per dozen eggs ≈ 1.8 kg CO₂e.",
+    "food_eggs":    "Moderate impact. Per dozen eggs ≈ 1.8 kg CO2e.",
     "food_bread":   "Low impact. Includes cereals, oats, flour.",
     "food_rice":    "Low-medium impact. Includes pasta, noodles.",
     "food_veg":     "Very low impact. All fresh, frozen and tinned vegetables.",
@@ -684,9 +749,9 @@ def build_smart_recommendations(inputs, emissions):
             "category":   "Energy",
             "icon":       "⚡",
             "title":      "Switch to a 100% renewable electricity tariff",
-            "body":       f"Your electricity currently produces {em.get('scope_2_kg',0):.0f} kg CO₂e/month. A green tariff drops this to zero — no change in how you use power, just a different supplier. Takes 15 minutes online.",
+            "body":       f"Your electricity currently produces {em.get('scope_2_kg',0):.0f} kg CO2e/month. A green tariff drops this to zero — no change in how you use power, just a different supplier. Takes 15 minutes online.",
             "saving_kg":  round(em.get("scope_2_kg", 0), 1),
-            "saving_label": f"Save {em.get('scope_2_kg',0):.0f} kg CO₂e/month",
+            "saving_label": f"Save {em.get('scope_2_kg',0):.0f} kg CO2e/month",
             "difficulty": "Easy",
             "linked_to":  "Your electricity input",
         })
@@ -698,9 +763,9 @@ def build_smart_recommendations(inputs, emissions):
             "category":   "Energy",
             "icon":       "🔥",
             "title":      "Turn your thermostat down by 1–2°C and lag your hot water tank",
-            "body":       f"You use {gas_kwh:.0f} kWh of gas/month. Reducing by 15% through draught-proofing and a lower thermostat setting saves approximately {save_kg:.0f} kg CO₂e/month — and cuts your gas bill by £{round(gas_kwh*0.15*get_current_prices()['gas_p_kwh']/100):.0f}/month.",
+            "body":       f"You use {gas_kwh:.0f} kWh of gas/month. Reducing by 15% through draught-proofing and a lower thermostat setting saves approximately {save_kg:.0f} kg CO2e/month — and cuts your gas bill by £{round(gas_kwh*0.15*get_current_prices()['gas_p_kwh']/100):.0f}/month.",
             "saving_kg":  save_kg,
-            "saving_label": f"Save ~{save_kg:.0f} kg CO₂e/month",
+            "saving_label": f"Save ~{save_kg:.0f} kg CO2e/month",
             "difficulty": "Easy",
             "linked_to":  f"Your gas input: {gas_kwh:.0f} kWh/month",
         })
@@ -710,9 +775,9 @@ def build_smart_recommendations(inputs, emissions):
             "category":   "Energy",
             "icon":       "🏠",
             "title":      "Consider cavity wall or loft insulation",
-            "body":       f"At {gas_kwh:.0f} kWh/month, your gas usage is high. Proper insulation typically reduces heating demand by 20–30%, saving {round(gas_kwh*0.25*get_factor('natural_gas'),0):.0f} kg CO₂e/month and significantly reducing bills.",
+            "body":       f"At {gas_kwh:.0f} kWh/month, your gas usage is high. Proper insulation typically reduces heating demand by 20–30%, saving {round(gas_kwh*0.25*get_factor('natural_gas'),0):.0f} kg CO2e/month and significantly reducing bills.",
             "saving_kg":  round(gas_kwh * 0.25 * get_factor("natural_gas"), 1),
-            "saving_label": f"Save ~{round(gas_kwh*0.25*get_factor('natural_gas'),0):.0f} kg CO₂e/month",
+            "saving_label": f"Save ~{round(gas_kwh*0.25*get_factor('natural_gas'),0):.0f} kg CO2e/month",
             "difficulty": "Medium",
             "linked_to":  f"Your gas input: {gas_kwh:.0f} kWh/month",
         })
@@ -723,7 +788,7 @@ def build_smart_recommendations(inputs, emissions):
             "category":   "Transport",
             "icon":       "🌟",
             "title":      "Your transport is already zero-carbon — outstanding",
-            "body":       "Walking and cycling produce no CO₂ at all. You're already leading by example on transport. Share your approach — it's the single most impactful transport choice anyone can make.",
+            "body":       "Walking and cycling produce no CO2e at all. You're already leading by example on transport. Share your approach — it's the single most impactful transport choice anyone can make.",
             "saving_kg":  0,
             "saving_label": "Already at zero",
             "difficulty": "Already done",
@@ -734,7 +799,7 @@ def build_smart_recommendations(inputs, emissions):
             "category":   "Transport",
             "icon":       "⚡",
             "title":      "Your vehicle is already low-carbon — well done",
-            "body":       "Your EV or PHEV produces significantly less CO₂ than petrol or diesel. Pair it with a renewable electricity tariff and your transport footprint becomes near-zero.",
+            "body":       "Your EV or PHEV produces significantly less CO2e than petrol or diesel. Pair it with a renewable electricity tariff and your transport footprint becomes near-zero.",
             "saving_kg":  round(em.get("transport_kg", 0) * 0.05, 1),
             "saving_label": "Switch to green tariff to go even lower",
             "difficulty": "Easy",
@@ -751,9 +816,9 @@ def build_smart_recommendations(inputs, emissions):
                         "category":   "Transport",
                         "icon":       "🔋",
                         "title":      f"Switch your {TRANSPORT_MAP[m['key']][1].lower()} to an EV for your next vehicle",
-                        "body":       f"Your {TRANSPORT_MAP[m['key']][1].lower()} produces {get_factor(m['key']):.3f} kgCO₂e/km. An equivalent EV produces {get_factor('electric_car'):.3f} kgCO₂e/km — 69% lower. At {km:.0f} km/month that's a saving of {save:.0f} kg CO₂e/month.",
+                        "body":       f"Your {TRANSPORT_MAP[m['key']][1].lower()} produces {get_factor(m['key']):.3f} kgCO2e/km. An equivalent EV produces {get_factor('electric_car'):.3f} kgCO2e/km — 69% lower. At {km:.0f} km/month that's a saving of {save:.0f} kg CO2e/month.",
                         "saving_kg":  save,
-                        "saving_label": f"Save {save:.0f} kg CO₂e/month",
+                        "saving_label": f"Save {save:.0f} kg CO2e/month",
                         "difficulty": "Hard",
                         "linked_to":  f"Your {TRANSPORT_MAP[m['key']][1]} at {km:.0f} km/month",
                     })
@@ -763,9 +828,9 @@ def build_smart_recommendations(inputs, emissions):
                 "category":   "Transport",
                 "icon":       "🚆",
                 "title":      "Replace some car journeys with public transport",
-                "body":       f"The bus emits 0.08 kgCO₂e/km vs 0.17 for a petrol car — half the emissions. National Rail is even lower at 0.035 kgCO₂e/km. Even replacing 25% of your car journeys with public transport would save meaningful CO₂.",
+                "body":       f"The bus emits 0.08 kgCO2e/km vs 0.17 for a petrol car — half the emissions. National Rail is even lower at 0.035 kgCO2e/km. Even replacing 25% of your car journeys with public transport would save meaningful CO2e.",
                 "saving_kg":  round(trans_kg * 0.15, 1),
-                "saving_label": f"Save ~{round(trans_kg*0.15,0):.0f} kg CO₂e/month",
+                "saving_label": f"Save ~{round(trans_kg*0.15,0):.0f} kg CO2e/month",
                 "difficulty": "Medium",
                 "linked_to":  "Your current transport mix",
             })
@@ -777,9 +842,9 @@ def build_smart_recommendations(inputs, emissions):
             "category":   "Food",
             "icon":       "🥩",
             "title":      f"Swap some beef/lamb for chicken, fish or plant-based alternatives",
-            "body":       f"You consume approximately {beef_kg:.1f} kg of beef/lamb per month. Beef produces 27 kgCO₂e/kg — 5× more than chicken (5.4 kg) and 47× more than vegetables (0.58 kg). Replacing just half your beef with chicken saves {round(beef_kg*0.5*(get_factor('food_beef')-get_factor('food_chicken')),1):.0f} kg CO₂e/month.",
+            "body":       f"You consume approximately {beef_kg:.1f} kg of beef/lamb per month. Beef produces 27 kgCO2e/kg — 5× more than chicken (5.4 kg) and 47× more than vegetables (0.58 kg). Replacing just half your beef with chicken saves {round(beef_kg*0.5*(get_factor('food_beef')-get_factor('food_chicken')),1):.0f} kg CO2e/month.",
             "saving_kg":  save_kg,
-            "saving_label": f"Save up to {save_kg:.0f} kg CO₂e/month",
+            "saving_label": f"Save up to {save_kg:.0f} kg CO2e/month",
             "difficulty": "Easy",
             "linked_to":  f"Your beef/lamb consumption: {beef_kg:.1f} kg/month",
         })
@@ -789,7 +854,7 @@ def build_smart_recommendations(inputs, emissions):
             "category":   "Food",
             "icon":       "🍗",
             "title":      "Your protein choices are already relatively low-carbon",
-            "body":       f"Chicken and fish produce 5.4 kgCO₂e/kg — much lower than beef (27 kg) or lamb (39 kg). Your food footprint is well below average for a meat-eater. Adding more plant-based meals a few days a week would reduce it further.",
+            "body":       f"Chicken and fish produce 5.4 kgCO2e/kg — much lower than beef (27 kg) or lamb (39 kg). Your food footprint is well below average for a meat-eater. Adding more plant-based meals a few days a week would reduce it further.",
             "saving_kg":  round(chicken_kg * 0.2 * (5.4 - 2.0), 1),
             "saving_label": "Add plant-based days to go lower",
             "difficulty": "Easy",
@@ -801,7 +866,7 @@ def build_smart_recommendations(inputs, emissions):
             "category":   "Food",
             "icon":       "🌱",
             "title":      "Your diet is already very low-carbon — well done",
-            "body":       "A plant-rich diet is one of the most powerful individual actions for the climate. Your food footprint is well below the UK average. Consider reducing dairy (especially cheese at 9.8 kgCO₂e/kg) if you want to go further.",
+            "body":       "A plant-rich diet is one of the most powerful individual actions for the climate. Your food footprint is well below the UK average. Consider reducing dairy (especially cheese at 9.8 kgCO2e/kg) if you want to go further.",
             "saving_kg":  0,
             "saving_label": "Already low-carbon",
             "difficulty": "Already done",
@@ -828,11 +893,58 @@ def build_smart_recommendations(inputs, emissions):
             "category":   "Water",
             "icon":       "💧",
             "title":      "Install flow restrictors and fix leaks to reduce water use",
-            "body":       f"Your water consumption of {water_m3:.0f} m³/month produces {water_kg:.0f} kg CO₂e and costs approximately £{round(water_m3*get_current_prices()['water_p_m3']/100,0):.0f}/month. Low-cost flow restrictors on taps and fixing dripping fixtures typically reduce commercial water use by 15–20%.",
+            "body":       f"Your water consumption of {water_m3:.0f} m³/month produces {water_kg:.0f} kg CO2e and costs approximately £{round(water_m3*get_current_prices()['water_p_m3']/100,0):.0f}/month. Low-cost flow restrictors on taps and fixing dripping fixtures typically reduce commercial water use by 15–20%.",
             "saving_kg":  round(water_kg * 0.15, 1),
-            "saving_label": f"Save ~{round(water_kg*0.15,0):.0f} kg CO₂e/month",
+            "saving_label": f"Save ~{round(water_kg*0.15,0):.0f} kg CO2e/month",
             "difficulty": "Easy",
             "linked_to":  f"Your water use: {water_m3:.0f} m³/month",
+        })
+
+    # ── WASTE & RECYCLING rec ─────────────────────────────────────────────────
+    waste_kg_in    = inputs.get("waste_kg", 0)
+    recycled_kg_in = inputs.get("recycled_kg", 0)
+    total_waste_in = waste_kg_in + recycled_kg_in
+    if total_waste_in > 5:
+        recycling_rate = round(recycled_kg_in / total_waste_in * 100) if total_waste_in > 0 else 0
+        waste_em       = em.get("waste_kg_em", 0)
+        if recycling_rate < 50:
+            # Model: general waste ~5x more carbon-intensive than recycled (landfill methane vs recycling)
+            potential_save = round(waste_em * 0.4, 1)  # raising recycling rate typically cuts this category ~40%
+            recs.append({
+                "category":   "Waste",
+                "icon":       "♻️",
+                "title":      "Increase your recycling rate to cut waste emissions",
+                "body":       f"You currently recycle around {recycling_rate}% of your waste ({recycled_kg_in:.0f} kg of {total_waste_in:.0f} kg/month). General waste sent to landfill produces significantly more CO2e than recycled material. Separating card, plastics, glass and food waste for collection is usually free and can cut this category by up to 40%.",
+                "saving_kg":  potential_save,
+                "saving_label": f"Save ~{potential_save:.0f} kg CO2e/month",
+                "difficulty": "Easy",
+                "linked_to":  f"Your waste: {recycling_rate}% recycled",
+            })
+        else:
+            recs.append({
+                "category":   "Waste",
+                "icon":       "♻️",
+                "title":      "Great recycling rate — consider a waste audit for further gains",
+                "body":       f"You already recycle around {recycling_rate}% of your waste — well above average. A waste audit can identify further reductions, such as switching to compostable packaging or reducing single-use items at source.",
+                "saving_kg":  round(waste_em * 0.1, 1),
+                "saving_label": "Already doing well",
+                "difficulty": "Easy",
+                "linked_to":  f"Your waste: {recycling_rate}% recycled",
+            })
+
+    # ── HOTEL rec (business only) ─────────────────────────────────────────────
+    hotel_nights_in = inputs.get("hotel_nights", 0)
+    if hotel_nights_in > 4 and org_type in ("business", "restaurant"):
+        hotel_em = em.get("hotel_kg", 0)
+        recs.append({
+            "category":   "Hotel",
+            "icon":       "🏨",
+            "title":      "Choose eco-certified hotels for business travel",
+            "body":       f"Your {hotel_nights_in:.0f} business hotel nights/month produce {hotel_em:.0f} kg CO2e. Booking hotels with recognised sustainability certification (e.g. Green Key, EarthCheck) typically cuts the carbon footprint of a stay by 20–30% — filter for these on your booking platform at no extra cost.",
+            "saving_kg":  round(hotel_em * 0.25, 1),
+            "saving_label": f"Save ~{round(hotel_em*0.25,0):.0f} kg CO2e/month",
+            "difficulty": "Easy",
+            "linked_to":  f"Your hotel nights: {hotel_nights_in:.0f}/month",
         })
 
     # Sort by saving_kg descending, but put "already done" last
@@ -889,6 +1001,17 @@ DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'freemium.db'
 def init_db():
     db = sqlite3.connect(DB_PATH)
     try:
+        db.execute("""CREATE TABLE IF NOT EXISTS session_log (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            pin_hash      TEXT,
+            org_type      TEXT,
+            region        TEXT,
+            business_name TEXT,
+            location_name TEXT,
+            ip_addr       TEXT,
+            user_agent    TEXT,
+            logged_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )""")
         db.execute("""CREATE TABLE IF NOT EXISTS email_captures (
             id            INTEGER PRIMARY KEY AUTOINCREMENT,
             email         TEXT    NOT NULL UNIQUE,
@@ -917,6 +1040,8 @@ def init_db():
             "ALTER TABLE email_captures ADD COLUMN recs_json    TEXT",
             "ALTER TABLE email_captures ADD COLUMN consented    INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE email_captures ADD COLUMN notified     INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE email_captures ADD COLUMN business_name TEXT",
+            "ALTER TABLE email_captures ADD COLUMN location_name TEXT",
         ]:
             try: db.execute(col_sql)
             except Exception: pass
@@ -931,7 +1056,7 @@ init_db()
 QUIZ_QUESTIONS = [
     # Round 1
     {"round":1,"emoji":"🚗",
-     "question":"Which transport emits the least CO2 per km?",
+     "question":"Which transport emits the least CO2e per km?",
      "options":["Petrol car","Diesel car","Electric car","Plane"],
      "answer":"Electric car",
      "fact":"An EV produces 0.053 kgCO2e/km vs 0.170 for a petrol car — 69% lower. (DESNZ 2025)"},
@@ -958,7 +1083,7 @@ QUIZ_QUESTIONS = [
      "answer":"Lamb (39 kg)",
      "fact":"Lamb produces 39.2 kgCO2e/kg — even higher than beef at 27 kg. Both are far above chicken at 5.4 kg."},
     {"round":3,"emoji":"🏠",
-     "question":"A home uses 900 kWh of gas per month. Roughly how much CO2 is that?",
+     "question":"A home uses 900 kWh of gas per month. Roughly how much CO2e is that?",
      "options":["16 kg","65 kg","165 kg","650 kg"],
      "answer":"165 kg",
      "fact":"900 kWh x 0.18296 kgCO2e/kWh = 164.7 kg CO2e per month — roughly the same as driving 970 km by car."},
@@ -967,7 +1092,10 @@ QUIZ_QUESTIONS = [
 @app.before_request
 def add_ngrok_bypass():
     """Auto-redirect ngrok visitors to bypass the interstitial warning page."""
-    if 'ngrok-free' in (request.host or '') and 'ngrok-skip-browser-warning' not in request.args:
+    if request.method != 'GET':
+        return  # never redirect POST requests — breaks login form
+    if 'ngrok-free' in (request.host or '') and \
+       'ngrok-skip-browser-warning' not in request.args:
         from flask import redirect
         separator = '&' if '?' in request.url else '?'
         return redirect(request.url + separator + 'ngrok-skip-browser-warning=true')
@@ -1000,6 +1128,22 @@ def calculate():
     prices   = {**get_current_prices(), **(body.get('prices') or {})}
     org_type = body.get('org_type', 'household')
     occupants= max(1, int(body.get('occupants', 1) or 1))
+    # Business mode extras
+    num_employees = max(1, int(body.get('num_employees', occupants) or occupants))
+    wfh_pct       = max(0.0, min(1.0, float(body.get('wfh_pct', 0) or 0)))
+    is_business   = org_type in ('business', 'restaurant')
+
+    # ── WFH homeworking emissions (Method A — DESNZ per-FTE-hour factor) ─────
+    # Official UK approach: DESNZ homeworking conversion factor in kg CO2e per
+    # FTE per WORKING HOUR × annual FTE working hours × WFH share, pro-rated
+    # to a month. Captures only the extra heating + office-equipment energy
+    # from working at home — NOT a share of the whole household bill.
+    # Counted as Scope 3 and included in the monthly total below.
+    wfh_factor_hr  = get_wfh_factor_kg_fte_hour()
+    wfh_hours_year = get_wfh_hours_per_fte_year()
+    wfh_kg = 0.0
+    if is_business and wfh_pct > 0:
+        wfh_kg = round(num_employees * wfh_pct * wfh_hours_year * wfh_factor_hr / 12.0, 2)
 
     # ── Energy ────────────────────────────────────────────────────────────────
     elec_kwh    = float(body.get('elec_kwh', 0) or 0)
@@ -1119,7 +1263,7 @@ def calculate():
     cost_food = round(cost_food, 2)
 
     # ── Totals ────────────────────────────────────────────────────────────────
-    total_kg   = round(energy_kg + transport_kg + food_kg + hotel_kg, 2)
+    total_kg   = round(energy_kg + transport_kg + food_kg + hotel_kg + wfh_kg, 2)
     cost_total = round(cost_energy + cost_transport + cost_food + cost_hotel, 2)
     cost_annual= round(cost_total * 12, 2)
     cost_pp    = round(cost_total / occupants, 2)
@@ -1127,11 +1271,12 @@ def calculate():
     # Scopes — built per transport mode (see transport_scope() above), not a
     # flat ratio. gas/oil/lpg combustion and owned-ICE-vehicle fuel = Scope 1;
     # purchased grid electricity (home + EV/PHEV charging) = Scope 2;
-    # food, water, hotel nights, third-party transport and flights = Scope 3.
+    # food, water, hotel nights, third-party transport, flights and employee
+    # homeworking (DESNZ factor) = Scope 3.
     scope_1_kg = round(gas_kg + lpg_kg + oil_kg + scope1_transport_kg, 2)
     scope_2_kg = round(elec_kg + scope2_transport_kg, 2)
     scope_3_kg = round(food_kg + water_kg + hotel_kg + waste_kg_em + recycle_kg_em
-                        + scope3_transport_kg, 2)
+                        + scope3_transport_kg + wfh_kg, 2)
 
     annual_kg  = round(total_kg * 12, 1)
     trees      = max(0, round(annual_kg / 21.7))
@@ -1147,17 +1292,44 @@ def calculate():
         "gas_kwh":         gas_kwh,
         "water_m3":        water_m3,
         "org_type":        org_type,
+        "hotel_nights":    hotel_nights,
+        "waste_kg":        waste_kg,
+        "recycled_kg":     recycled_kg,
     }
     emissions_for_recs = {
         "scope_2_kg":    scope_2_kg,
         "transport_kg":  transport_kg,
         "food_kg":       food_kg,
+        "hotel_kg":      hotel_kg,
+        "waste_kg_em":   waste_kg_em,
     }
     try:
         recs = build_smart_recommendations(inputs_for_recs, emissions_for_recs)
     except Exception as rec_err:
         import traceback; traceback.print_exc()
         recs = []  # gracefully degrade — return results without recommendations
+
+    # ── Office space efficiency recommendation (high WFH share) ──────────────
+    # A business with substantial home working is still heating/lighting its
+    # premises at near-full capacity — a real cost and carbon inefficiency.
+    if is_business and wfh_pct >= 0.30 and num_employees > 1:
+        office_energy_kg = round(elec_kg + gas_kg + lpg_kg + oil_kg, 1)
+        est_save_kg      = round(office_energy_kg * 0.10, 1)
+        recs.append({
+            "icon":       "🏢",
+            "title":      "Right-size your office use — significant home working",
+            "body":       (f"{round(wfh_pct*100)}% of your {num_employees} staff work from home, "
+                           f"but your premises energy ({office_energy_kg:.0f} kg CO2e/month) is unchanged — "
+                           "you are paying to heat, light and service space at close to full capacity. "
+                           "Consider hot-desking, consolidating floors/rooms, zoned heating, or reviewing "
+                           "your space needs to capture savings on both cost and carbon."),
+            "saving_kg":  est_save_kg,
+            "saving_label": f"Save ~{est_save_kg:.0f} kg CO2e/month (est. 10% of premises energy)",
+            "difficulty": "Medium",
+            "linked_to":  f"Your WFH share: {round(wfh_pct*100)}% of {num_employees} staff",
+        })
+
+    per_employee_kg = round(total_kg / num_employees, 2) if is_business else None
 
     return jsonify({
         "status": "ok",
@@ -1166,12 +1338,16 @@ def calculate():
             "transport_kg": round(transport_kg, 2),
             "food_kg":      round(food_kg,      2),
             "water_kg":     round(water_kg,     2),
+            "waste_kg":     round(waste_kg_em,  2),
+            "hotel_kg":     round(hotel_kg,     2),
+            "wfh_kg":       wfh_kg,
             "total_kg":     total_kg,
             "vs_uk_avg_kg": vs_avg,
             "vs_uk_avg_pct":round(vs_avg / UK_MONTHLY_AVERAGE_KG * 100, 1),
             "scope_1_kg":   scope_1_kg,
             "scope_2_kg":   scope_2_kg,
             "scope_3_kg":   scope_3_kg,
+            "trees":        trees,
         },
         "costs": {
             "elec": cost_elec, "gas": cost_gas, "water": cost_water,
@@ -1200,6 +1376,20 @@ def calculate():
             "elec_kwh": elec_kwh, "gas_kwh": gas_kwh, "water_m3": water_m3,
             "transport_modes": transport_modes, "food_items": food_items_input,
             "org_type": org_type,
+        },
+        "business": {
+            "is_business":        is_business,
+            "num_employees":      num_employees,
+            "wfh_pct":            wfh_pct,
+            "per_employee_kg":    per_employee_kg,
+            "wfh_kg":             wfh_kg,
+            "wfh_total_extra_kg": wfh_kg,  # legacy key name kept for UI compatibility
+            "wfh_factor_kg_fte_hour": wfh_factor_hr,
+            "wfh_hours_per_fte_year": wfh_hours_year,
+            "wfh_factor_verified":    is_wfh_factor_verified(),
+            "wfh_source_url": "https://www.gov.uk/government/collections/government-conversion-factors-for-company-reporting",
+            "wfh_method": ("UK DESNZ homeworking factor (kg CO2e per FTE working hour) "
+                           "x annual FTE hours x WFH share, pro-rated monthly - Scope 3, included in total"),
         },
         "source": f"DESNZ 2025 · {get_price_source_label()}",
     })
@@ -1368,7 +1558,7 @@ def scenario_optimise():
     narrative.append(
         f"As a result, your carbon footprint falls from "
         f"<strong>{total_kg:.0f} kg</strong> to "
-        f"<strong>{new_total_kg:.0f} kg CO₂e/month</strong> — "
+        f"<strong>{new_total_kg:.0f} kg CO2e/month</strong> — "
         f"a <strong>{em_pct}% reduction</strong>."
     )
     narrative.append(
@@ -1390,7 +1580,7 @@ def scenario_optimise():
             "cost_save":   r["cost_save"],
             "em_save":     r["em_save"],
             "cost_str":    f"£{r['cost_save']:.0f}/month",
-            "em_str":      f"{r['em_save']:.1f} kg CO₂e/month",
+            "em_str":      f"{r['em_save']:.1f} kg CO2e/month",
             "description": FEASIBILITY_BOUNDS[cat]["description"],
             "difficulty":  diff,
             "disruption":  r["disruption"],
@@ -1511,17 +1701,19 @@ def capture_email():
         return '', 200
 
     body         = request.get_json(silent=True) or {}
-    raw_email    = (body.get('email') or '').strip().lower()[:254]
-    consented    = bool(body.get('consented', False))
-    org_type     = (body.get('org_type') or 'household').strip()[:40]
-    region       = (body.get('region') or 'UK').strip()[:10].upper()
+    raw_email     = (body.get('email') or '').strip().lower()[:254]
+    consented     = bool(body.get('consented', False))
+    org_type      = (body.get('org_type') or 'household').strip()[:40]
+    region        = (body.get('region') or 'UK').strip()[:10].upper()
+    business_name = (body.get('business_name') or '').strip()[:120]
+    location_name = (body.get('location_name') or '').strip()[:120]
 
     # Footprint breakdown
-    energy_kg    = body.get('energy_kg')
-    transport_kg = body.get('transport_kg')
-    food_kg      = body.get('food_kg')
-    other_kg     = body.get('other_kg')
-    total_kg     = body.get('total_kg') or body.get('result_kg')
+    energy_kg      = body.get('energy_kg')
+    transport_kg   = body.get('transport_kg')
+    food_kg        = body.get('food_kg')
+    hotel_waste_kg = body.get('hotel_waste_kg', body.get('other_kg'))  # 'other_kg' kept for backward compat
+    total_kg       = body.get('total_kg') or body.get('result_kg')
     recs_json    = body.get('recs_json') or '[]'
 
     # Validate
@@ -1542,13 +1734,13 @@ def capture_email():
         cur = db.execute(
             """INSERT OR IGNORE INTO email_captures
                (email, org_type, region, energy_kg, transport_kg, food_kg, other_kg,
-                total_kg, result_kg, recs_json, consented, notified)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,0)""",
+                total_kg, result_kg, recs_json, consented, notified, business_name, location_name)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,0,?,?)""",
             (raw_email, org_type, region,
              _safe_float(energy_kg), _safe_float(transport_kg),
-             _safe_float(food_kg),   _safe_float(other_kg),
+             _safe_float(food_kg),   _safe_float(hotel_waste_kg),
              _safe_float(total_kg),  _safe_float(total_kg),
-             str(recs_json), 1)
+             str(recs_json), 1, business_name, location_name)
         )
         db.commit()
         is_new = cur.rowcount > 0
@@ -1562,7 +1754,8 @@ def capture_email():
         smtp_port = int(os.environ.get('SMTP_PORT', '587'))
         notify_to = os.environ.get('NOTIFY_EMAIL', 'info@i-nocarbon.com').strip()
 
-        if is_new and smtp_host and smtp_user and smtp_pass:
+        # Always send emails — not just on first submission
+        if smtp_host and smtp_user and smtp_pass:
             try:
                 import smtplib
                 from email.mime.text import MIMEText
@@ -1578,16 +1771,25 @@ def capture_email():
                     for i, r in enumerate(recs_list)
                 ) or '  (no recommendations recorded)'
 
+                # Use calculated float values directly
+                t_kg  = _safe_float(total_kg)     or 0
+                e_kg  = _safe_float(energy_kg)      or 0
+                tr_kg = _safe_float(transport_kg)   or 0
+                f_kg  = _safe_float(food_kg)        or 0
+                hw_kg = _safe_float(hotel_waste_kg) or 0
+
                 body_text = f"""New i-NoCarbon Freemium Lead
 {'='*40}
-Email:       {raw_email}
-Org type:    {org_type}
-Region:      {region}
-Total CO2:   {_safe_float(total_kg) or 'n/a'} kg/month
-  Energy:    {_safe_float(energy_kg) or 'n/a'} kg
-  Transport: {_safe_float(transport_kg) or 'n/a'} kg
-  Food:      {_safe_float(food_kg) or 'n/a'} kg
-  Other:     {_safe_float(other_kg) or 'n/a'} kg
+Email:        {raw_email}
+Business:     {business_name or '(not provided)'}
+Location:     {location_name or '(not provided)'}
+Org type:     {org_type}
+Region:       {region}
+Total:        {t_kg} kg CO2e/month
+  Energy:     {e_kg} kg CO2e/month
+  Transport:  {tr_kg} kg CO2e/month
+  Food:       {f_kg} kg CO2e/month
+  Hotel & Waste: {hw_kg} kg CO2e/month
 
 Top Recommendations:
 {rec_lines}
@@ -1595,32 +1797,35 @@ Top Recommendations:
 Consented:   Yes (GDPR)
 Captured:    {__import__('datetime').datetime.now().strftime('%d %b %Y %H:%M')}
 {'='*40}
-Action: Reply to {raw_email} with their personalised PDF report.
+Next step: Contact {raw_email} to discuss results, then send PDF download link from Admin Panel.
 """
                 msg = MIMEMultipart()
-                msg['From']    = smtp_user
+                msg['From']    = f'i-NoCarbon <{smtp_user}>'
                 msg['To']      = notify_to
-                msg['Subject'] = f'🌿 New i-NoCarbon lead: {raw_email} ({_safe_float(total_kg) or "?"} kg CO2/mo)'
+                msg['Subject'] = f'🌿 i-NoCarbon lead: {raw_email} ({t_kg} kg CO\u2082/mo)'
                 msg.attach(MIMEText(body_text, 'plain'))
 
                 with smtplib.SMTP(smtp_host, smtp_port) as srv:
                     srv.starttls()
                     srv.login(smtp_user, smtp_pass)
+                    # 1. Notify i-NoCarbon
                     srv.sendmail(smtp_user, notify_to, msg.as_string())
+                    # 2. Send Tranche 1 email to user
+                    _send_tranche1_email(raw_email, t_kg, e_kg, tr_kg, f_kg, hw_kg)
 
                 notified = True
-                db.execute("UPDATE email_captures SET notified=1 WHERE id=?", (lead_id,))
-                db.commit()
+                if is_new:
+                    db.execute("UPDATE email_captures SET notified=1 WHERE id=?", (lead_id,))
+                    db.commit()
 
             except Exception:
                 import traceback; traceback.print_exc()
-                # Non-fatal — lead is saved, notification just didn't send
 
         db.close()
         db = None
 
-        msg = ('Thanks! We\'ll send your personalised report to ' + raw_email + ' shortly.' if is_new
-               else 'You\'re already on our list — we\'ll be in touch with your report.')
+        msg = ('Thank you — we will be in touch to discuss your results.' if is_new
+               else 'Thank you — we will be in touch shortly.')
         return jsonify({'status': 'ok', 'message': msg, 'is_new': is_new, 'notified': notified})
 
     except Exception as e:
@@ -1664,6 +1869,295 @@ def admin_leads():
     finally:
         if db:
             db.close()
+
+
+@app.route('/api/admin/session-log')
+@require_admin
+def api_session_log():
+    """Return recent session log for admin panel."""
+    try:
+        db = sqlite3.connect(DB_PATH)
+        rows = db.execute(
+            "SELECT pin_hash, org_type, region, business_name, location_name, ip_addr, logged_at "
+            "FROM session_log ORDER BY logged_at DESC LIMIT 100"
+        ).fetchall()
+        db.close()
+        return jsonify({'status': 'ok', 'sessions': [
+            {'pin_hash': r[0], 'org_type': r[1], 'region': r[2],
+             'business_name': r[3], 'location_name': r[4],
+             'ip_addr': r[5], 'logged_at': r[6]}
+            for r in rows
+        ]})
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)})
+
+
+# ── PDF download toggle ───────────────────────────────────────────────────────
+@app.route('/api/admin/pdf-toggle', methods=['POST'])
+@require_admin
+def api_pdf_toggle():
+    body    = request.get_json(silent=True) or {}
+    enabled = bool(body.get('enabled', False))
+    flag    = os.path.join(os.path.dirname(DB_PATH), 'pdf_enabled.flag')
+    try:
+        if enabled:
+            open(flag, 'w').write('1')
+        else:
+            if os.path.exists(flag): os.remove(flag)
+    except Exception:
+        pass
+    return jsonify({'status': 'ok', 'pdf_enabled': enabled})
+
+
+@app.route('/api/pdf-status')
+@require_auth
+def api_pdf_status():
+    # Admin always has PDF access (to preview the report).
+    # Users get it via a one-time token (session flag) or the global flag file.
+    flag    = os.path.join(os.path.dirname(DB_PATH), 'pdf_enabled.flag')
+    enabled = is_admin() or bool(session.get('pdf_unlocked')) or os.path.exists(flag)
+    return jsonify({'status': 'ok', 'pdf_enabled': enabled, 'is_admin': is_admin()})
+
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PDF TOKEN SYSTEM — two-tranche email + one-time download
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _ensure_pdf_token_table():
+    """Create pdf_tokens table if not exists."""
+    try:
+        db = sqlite3.connect(DB_PATH)
+        db.execute("""CREATE TABLE IF NOT EXISTS pdf_tokens (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            email      TEXT NOT NULL,
+            token      TEXT NOT NULL UNIQUE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            expires_at TIMESTAMP NOT NULL,
+            used       INTEGER DEFAULT 0,
+            used_at    TIMESTAMP
+        )""")
+        db.commit(); db.close()
+    except Exception:
+        pass
+
+_ensure_pdf_token_table()
+
+
+def _send_tranche1_email(email, total_kg, energy_kg, transport_kg, food_kg, hotel_waste_kg=0):
+    """Tranche 1 — sent immediately when user submits email."""
+    import smtplib as _smtp
+    from email.mime.multipart import MIMEMultipart as _MMP
+    from email.mime.text import MIMEText as _MMT
+    smtp_host = os.environ.get('SMTP_HOST','').strip()
+    smtp_user = os.environ.get('SMTP_USER','').strip()
+    smtp_pass = os.environ.get('SMTP_PASS','').strip()
+    smtp_port = int(os.environ.get('SMTP_PORT','587'))
+    if not all([smtp_host, smtp_user, smtp_pass]):
+        return False
+    try:
+        msg = _MMP()
+        msg['From']    = f'i-NoCarbon <{smtp_user}>'
+        msg['To']      = email
+        msg['Subject'] = 'Thank you — your i-NoCarbon carbon footprint results'
+        body = f"""Hi,
+
+Thank you for using the i-NoCarbon Freemium Carbon Calculator.
+
+Your carbon footprint has been calculated. Here is a summary:
+
+  Total:         {float(total_kg or 0):.0f} kg CO2e / month
+  Energy:        {float(energy_kg or 0):.0f} kg CO2e / month
+  Transport:     {float(transport_kg or 0):.0f} kg CO2e / month
+  Food:          {float(food_kg or 0):.0f} kg CO2e / month
+  Hotel & Waste: {float(hotel_waste_kg or 0):.0f} kg CO2e / month
+
+What happens next:
+
+  1. Review your results in the app and check the recommended actions
+  2. Refine your data if needed — more accurate figures give a more useful report
+  3. Discuss your findings with us — we can help interpret your results and agree next steps
+  4. Download your PDF report — once you are happy with your data and have discussed
+     with us, we will send you a one-time secure link to download your personalised
+     PDF carbon report
+
+We will be in touch shortly.
+
+Kind regards,
+The i-NoCarbon Team
+info@i-nocarbon.com | i-nocarbon.com
+
+This is a one-time email. To request data deletion, reply to this email.
+"""
+        msg.attach(_MMT(body, 'plain'))
+        with _smtp.SMTP(smtp_host, smtp_port) as srv:
+            srv.starttls()
+            srv.login(smtp_user, smtp_pass)
+            srv.sendmail(smtp_user, email, msg.as_string())
+        return True
+    except Exception as e:
+        app.logger.error(f'Tranche1 email error: {e}')
+        return False
+
+
+def _send_tranche2_email(email, token, expires_at, base_url):
+    """Tranche 2 — sent by admin after discussion, contains one-time link."""
+    import smtplib as _smtp
+    from email.mime.multipart import MIMEMultipart as _MMP
+    from email.mime.text import MIMEText as _MMT
+    from datetime import datetime as _dt
+    smtp_host = os.environ.get('SMTP_HOST','').strip()
+    smtp_user = os.environ.get('SMTP_USER','').strip()
+    smtp_pass = os.environ.get('SMTP_PASS','').strip()
+    smtp_port = int(os.environ.get('SMTP_PORT','587'))
+    if not all([smtp_host, smtp_user, smtp_pass]):
+        return False
+    try:
+        expiry_str = _dt.fromisoformat(expires_at).strftime('%A %d %B %Y at %H:%M')
+        link = f'{base_url}/unlock-pdf?token={token}'
+        msg = _MMP()
+        msg['From']    = f'i-NoCarbon <{smtp_user}>'
+        msg['To']      = email
+        msg['Subject'] = 'Your i-NoCarbon Carbon Report — Ready to Download'
+        body = f"""Hi,
+
+Following our discussion, your personalised carbon footprint report is now ready to download.
+
+Before downloading, please:
+
+  ✓ Update all data for your business in the calculator
+  2. Review your recommended actions as suggested by the calculator
+  3. Check your results look correct as suggested by the calculator
+
+When you are ready, click the link below to access your report.
+
+You will be asked to confirm that your data is complete before the
+download button becomes available.
+
+⚠  IMPORTANT — One-time download link
+    This link can only be used ONCE.
+    Once you download your report, the link will no longer work.
+    Your link expires: {expiry_str}
+
+    If you need to make changes after downloading, contact us at
+    info@i-nocarbon.com and we will issue a new link.
+
+Access your report:
+{link}
+
+Kind regards,
+The i-NoCarbon Team
+info@i-nocarbon.com
+https://www.i-nocarbon.com
+
+--
+i-NoCarbon Limited | GDPR compliant
+To request deletion of your data, email info@i-nocarbon.com
+"""
+        msg.attach(_MMT(body, 'plain'))
+        with _smtp.SMTP(smtp_host, smtp_port) as srv:
+            srv.starttls()
+            srv.login(smtp_user, smtp_pass)
+            srv.sendmail(smtp_user, email, msg.as_string())
+        return True
+    except Exception as e:
+        app.logger.error(f'Tranche2 email error: {e}')
+        return False
+
+
+@app.route('/api/admin/send-pdf-link', methods=['POST'])
+@require_admin
+def api_send_pdf_link():
+    """Admin sends Tranche 2 email with one-time PDF unlock token."""
+    import secrets, datetime
+    body  = request.get_json(silent=True) or {}
+    email = (body.get('email') or '').strip().lower()
+    if not email:
+        return jsonify({'status':'error','message':'Email required'})
+    # Generate token
+    token      = secrets.token_hex(24)
+    expires_at = (datetime.datetime.utcnow() + datetime.timedelta(hours=48)).isoformat()
+    # Store in DB
+    _ensure_pdf_token_table()
+    try:
+        db = sqlite3.connect(DB_PATH)
+        db.execute(
+            "INSERT INTO pdf_tokens (email, token, expires_at) VALUES (?,?,?)",
+            (email, token, expires_at)
+        )
+        db.commit(); db.close()
+    except Exception as e:
+        return jsonify({'status':'error','message':f'DB error: {e}'})
+    # Send email
+    base_url = request.host_url.rstrip('/')
+    sent = _send_tranche2_email(email, token, expires_at, base_url)
+    return jsonify({
+        'status':     'ok' if sent else 'token_created',
+        'message':    'Email sent with one-time download link' if sent
+                      else 'Token created but email failed — check SMTP config',
+        'token':      token,
+        'expires_at': expires_at,
+        'link':       f'{base_url}/unlock-pdf?token={token}'
+    })
+
+
+@app.route('/unlock-pdf')
+def unlock_pdf():
+    """Validate token and redirect to app with PDF session flag set."""
+    import datetime
+    token = request.args.get('token','').strip()
+    if not token:
+        return redirect('/?pdf_error=missing_token')
+    _ensure_pdf_token_table()
+    try:
+        db  = sqlite3.connect(DB_PATH)
+        row = db.execute(
+            "SELECT email, expires_at, used FROM pdf_tokens WHERE token=?",
+            (token,)
+        ).fetchone()
+        db.close()
+    except Exception:
+        return redirect('/?pdf_error=db_error')
+    if not row:
+        return redirect('/?pdf_error=invalid')
+    email, expires_at, used = row
+    if used:
+        return redirect('/?pdf_error=already_used')
+    if datetime.datetime.utcnow() > datetime.datetime.fromisoformat(expires_at):
+        return redirect('/?pdf_error=expired')
+    # Valid — set session flag and store token for single-use enforcement
+    session['pdf_token']    = token
+    session['pdf_email']    = email
+    session['pdf_unlocked'] = True
+    return redirect('/?pdf_ready=1')
+
+
+@app.route('/api/pdf-download-confirm', methods=['POST'])
+@require_auth
+def api_pdf_download_confirm():
+    """Mark token as used after user confirms and downloads."""
+    import datetime
+    token = session.get('pdf_token','')
+    if not token:
+        return jsonify({'status':'error','message':'No active PDF token'})
+    try:
+        db = sqlite3.connect(DB_PATH)
+        db.execute(
+            "UPDATE pdf_tokens SET used=1, used_at=? WHERE token=? AND used=0",
+            (datetime.datetime.utcnow().isoformat(), token)
+        )
+        db.commit()
+        changed = db.total_changes
+        db.close()
+    except Exception as e:
+        return jsonify({'status':'error','message':str(e)})
+    if changed == 0:
+        return jsonify({'status':'error','message':'Token already used or invalid'})
+    # Clear session flags
+    session.pop('pdf_token',    None)
+    session.pop('pdf_email',    None)
+    session.pop('pdf_unlocked', None)
+    return jsonify({'status':'ok','message':'Token marked as used'})
 
 
 # ── Anthropic API key management ────────────────────────────────────────────
@@ -1726,8 +2220,17 @@ Return format:
   "lpg_kwh": 0, "oil_kwh": 0,
   "hotel_nights": 0, "hotel_type": "uk_average",
   "waste_kg": 0, "recycled_kg": 0,
+  "num_employees": 1, "wfh_pct": 0.0,
   "extras": []
 }
+
+For BUSINESS inputs:
+- "num_employees": total headcount (e.g. "12 staff" → 12, "team of 8" → 8)
+- "wfh_pct": fraction working from home 0.0–1.0 (e.g. "40% work from home" → 0.4)
+- elec_kwh / gas_kwh = OFFICE/PREMISES totals (not per person)
+- Company vehicles = transport_modes with TOTAL fleet km/month (e.g. 3 cars × 800km = 2400)
+- Business flights = flight_* keys with total km across all employees per month
+- Staff commuting = national_rail/bus_local/petrol_car_avg with combined km for all commuting staff
 
 Transport keys: petrol_car_avg, diesel_car_avg, electric_car, hybrid_car, petrol_small, petrol_large,
 diesel_van_medium, diesel_van_large, electric_van, national_rail, bus_local, tube, motorbike,
@@ -1822,6 +2325,37 @@ def api_ai_toggle():
                     'active_provider': os.environ.get('ACTIVE_AI_PROVIDER', 'gemini').strip().lower(),
                     'is_admin': is_admin()})
 
+# ── Demo tour AI auto-restore ─────────────────────────────────────────────────
+# When an admin starts the tour they call /api/tour-start which snapshots the
+# current AI state. When any user exits the tour, /api/tour-ai-reset is called
+# — if AI was OFF before the tour started, it is automatically turned back off.
+# This lets the admin enable AI purely for the tour without leaving it on
+# for regular users after the tour ends.
+
+_tour_ai_was_on = None  # None = no tour in progress
+
+@app.route('/api/tour-start', methods=['POST'])
+def api_tour_start():
+    """Admin-only: snapshot AI state before starting the demo tour."""
+    global _tour_ai_was_on
+    if not is_admin():
+        return jsonify({'status': 'error', 'message': 'Admin only'}), 403
+    _tour_ai_was_on = _ai_enabled()
+    return jsonify({'status': 'ok', 'ai_was_on': _tour_ai_was_on})
+
+@app.route('/api/tour-ai-reset', methods=['POST'])
+def api_tour_ai_reset():
+    """Called by any session on tour exit. If Admin AI was off before the tour,
+    turns it back off automatically."""
+    global _tour_ai_was_on
+    if _tour_ai_was_on is False:
+        # AI was off before tour — restore that state
+        _set_ai_enabled(False)
+        _tour_ai_was_on = None
+        return jsonify({'status': 'ok', 'action': 'ai_disabled'})
+    _tour_ai_was_on = None
+    return jsonify({'status': 'ok', 'action': 'no_change'})
+
 @app.route('/api/admin/user-access-toggle', methods=['POST'])
 @require_admin
 def api_user_access_toggle():
@@ -1877,6 +2411,9 @@ def admin_stats():
         'admin_user':  session.get('admin_user', 'admin'),
         'prices':              get_current_prices(),
         'hotel_ef_uk_average': get_hotel_ef_uk_average(),
+        'wfh_factor_kg_fte_hour': get_wfh_factor_kg_fte_hour(),
+        'wfh_hours_per_fte_year': get_wfh_hours_per_fte_year(),
+        'wfh_factor_verified':    is_wfh_factor_verified(),
         'price_source_label':  get_price_source_label(),
         'price_updated_date':  get_price_updated_date(),
     })
@@ -1925,6 +2462,8 @@ def api_admin_update_source():
             'water_p_m3':         body.get('water_p_m3'),
             'hotel_avg_night':    body.get('hotel_avg_night'),
             'hotel_ef_uk_average':body.get('hotel_ef_uk_average'),
+            'wfh_factor_kg_fte_hour': body.get('wfh_factor_kg_fte_hour'),
+            'wfh_hours_per_fte_year': body.get('wfh_hours_per_fte_year'),
             'price_source_label': body.get('price_source_label'),
         })
     except Exception as e:
@@ -1934,6 +2473,9 @@ def api_admin_update_source():
         'message': 'Pricing & source data updated',
         'prices': get_current_prices(),
         'hotel_ef_uk_average': get_hotel_ef_uk_average(),
+        'wfh_factor_kg_fte_hour': get_wfh_factor_kg_fte_hour(),
+        'wfh_hours_per_fte_year': get_wfh_hours_per_fte_year(),
+        'wfh_factor_verified':    is_wfh_factor_verified(),
         'price_source_label': get_price_source_label(),
         'price_updated_date': get_price_updated_date(),
     })
@@ -2016,7 +2558,7 @@ def api_ai_entry():
         if not gemini_key:
             return jsonify({'status': '0', 'error': 'no_key', 'message': 'No Gemini API key — add to .env or set via Admin panel'})
 
-        gemini_models = ['gemini-3.1-flash-lite', 'gemini-2.5-flash', 'gemini-3.5-flash']
+        gemini_models = ['gemini-2.0-flash', 'gemini-2.5-flash', 'gemini-1.5-flash']
         _RETRY_CODES = (400, 404, 429, 500, 529)
         for g_model in gemini_models:
             try:
@@ -2091,6 +2633,355 @@ def api_ai_entry():
                 continue
         return jsonify({'status': '0', 'message': 'All models failed'})
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PHASE 1 — BILL UPLOAD, MULTI-SITE, ACCOUNTANT TEMPLATE
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── Business-friendly AI cost labels ─────────────────────────────────────────
+AI_COST_INFO = {
+    'gemini': {
+        'label': 'Free for most businesses',
+        'detail': 'AI reads your bill automatically. For typical business use this costs nothing.',
+        'when': 'Best for: one-off uploads, scanned paper bills, messy PDFs'
+    },
+    'anthropic': {
+        'label': 'Free for most businesses',
+        'detail': 'AI reads your bill automatically. Very low cost even for heavy users.',
+        'when': 'Best for: complex or handwritten bills'
+    }
+}
+
+TEMPLATE_COST_INFO = {
+    'label': 'Always free — no AI used',
+    'detail': 'Your accountant fills in a simple spreadsheet each month. No cost ever.',
+    'when': 'Best for: regular monthly uploads — faster, no errors, no AI cost'
+}
+
+@app.route('/api/bill-cost-info', methods=['GET'])
+def api_bill_cost_info():
+    provider = os.environ.get('ACTIVE_AI_PROVIDER', 'gemini').strip().lower()
+    return jsonify({
+        'status': 'ok',
+        'ai': AI_COST_INFO.get(provider, AI_COST_INFO['gemini']),
+        'template': TEMPLATE_COST_INFO,
+        'recommendation': {
+            'new_user': 'New to the app? Let AI read your first bill — it takes 30 seconds.',
+            'returning': 'Coming back monthly? Ask your accountant to use our free template — faster, no errors, no cost.'
+        }
+    })
+
+
+# ── Bill extraction via AI ────────────────────────────────────────────────────
+_BILL_SYSTEM_PROMPT = """You are a UK business utility bill data extractor for i-NoCarbon.
+Extract figures from the bill and return ONLY a JSON object (no markdown).
+
+Return format:
+{
+  "bill_type": "electricity|gas|water|waste|food",
+  "supplier": "supplier name or unknown",
+  "period_start": "YYYY-MM-DD or null",
+  "period_end": "YYYY-MM-DD or null",
+  "period_days": 30,
+  "raw_value": 0.0,
+  "raw_unit": "kWh|m3|kg|GBP",
+  "monthly_value": 0.0,
+  "monthly_unit": "kWh|m3|kg|GBP",
+  "unit_rate": null,
+  "standing_charge": null,
+  "total_cost_gbp": null,
+  "recycled_kg": null,
+  "landfill_kg": null,
+  "confidence": "high|medium|low",
+  "notes": "any caveats or assumptions made"
+}
+
+Rules:
+- Always normalise to a 30-day month (multiply by 30/period_days)
+- Gas: if given in m3, convert to kWh by multiplying by 11.1 (UK calorific value)
+- Water: return in m3
+- Waste: split into recycled_kg and landfill_kg if both shown
+- Food: extract total GBP spend on meat/fish if shown
+- confidence=low means you are guessing — flag it clearly in notes
+- Return ONLY the JSON — no explanation, no markdown fences"""
+
+
+@app.route('/api/bill-extract', methods=['POST', 'OPTIONS'])
+@require_auth
+def api_bill_extract():
+    """Extract utility bill data from uploaded file using AI."""
+    if request.method == 'OPTIONS':
+        return '', 200
+
+    import base64 as _b64
+    import json as _json
+
+    bill_type = request.form.get('bill_type', 'electricity')
+    supplier  = request.form.get('supplier', '')
+    file_obj  = request.files.get('bill_file')
+
+    if not file_obj:
+        return jsonify({'status': '0', 'message': 'No file uploaded'})
+
+    filename  = file_obj.filename.lower()
+    file_data = file_obj.read()
+
+    if not _ai_enabled():
+        return jsonify({'status': '0', 'error': 'disabled',
+                        'message': 'AI is currently disabled. Use the free accountant template instead.'})
+
+    provider = os.environ.get('ACTIVE_AI_PROVIDER', 'gemini').strip().lower()
+
+    user_prompt = (
+        f"Please extract data from this {bill_type} bill"
+        + (f" from {supplier}" if supplier else "")
+        + ". Return the JSON as specified."
+    )
+
+    # ── CSV / Excel — parse directly, no AI needed ─────────────────────────
+    if filename.endswith('.csv') or filename.endswith('.xlsx') or filename.endswith('.xls'):
+        try:
+            result = _parse_template_upload(file_data, filename, bill_type)
+            return jsonify({'status': 'ok', 'parsed': result, 'method': 'template',
+                            'confidence': 'high', 'notes': 'Parsed from structured file — no AI used'})
+        except Exception as e:
+            return jsonify({'status': '0', 'message': f'Could not parse file: {e}'})
+
+    # ── PDF or image — use AI ──────────────────────────────────────────────
+    if provider == 'gemini':
+        gemini_key = _get_gemini_key()
+        if not gemini_key:
+            return jsonify({'status': '0', 'error': 'no_key',
+                            'message': 'No AI key set. Use the free accountant template instead.'})
+        import urllib.request as _ur, urllib.error as _ue
+        # Determine mime type
+        if filename.endswith('.pdf'):
+            mime = 'application/pdf'
+        elif filename.endswith('.png'):
+            mime = 'image/png'
+        else:
+            mime = 'image/jpeg'
+        b64data = _b64.b64encode(file_data).decode()
+        for model in ['gemini-3.1-flash-lite', 'gemini-2.5-flash']:
+            try:
+                payload = _json.dumps({
+                    'contents': [{'parts': [
+                        {'inline_data': {'mime_type': mime, 'data': b64data}},
+                        {'text': user_prompt}
+                    ]}],
+                    'systemInstruction': {'parts': [{'text': _BILL_SYSTEM_PROMPT}]},
+                    'generationConfig': {'responseMimeType': 'application/json', 'temperature': 0.1}
+                }).encode()
+                url = f'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={gemini_key}'
+                req = _ur.Request(url, data=payload, headers={'Content-Type': 'application/json'})
+                with _ur.urlopen(req, timeout=30) as resp:
+                    r = _json.loads(resp.read())
+                raw = r['candidates'][0]['content']['parts'][0]['text']
+                parsed = _json.loads(raw.strip())
+                return jsonify({'status': 'ok', 'parsed': parsed, 'method': 'ai', 'model': model})
+            except Exception:
+                continue
+        return jsonify({'status': '0', 'message': 'AI could not read this bill. Try the free accountant template instead.'})
+
+    else:  # anthropic
+        api_key = _get_api_key()
+        if not api_key:
+            return jsonify({'status': '0', 'error': 'no_key',
+                            'message': 'No AI key set. Use the free accountant template instead.'})
+        import urllib.request as _ur, urllib.error as _ue
+        if filename.endswith('.pdf'):
+            content_block = {'type': 'document', 'source': {'type': 'base64', 'media_type': 'application/pdf', 'data': _b64.b64encode(file_data).decode()}}
+        else:
+            mt = 'image/png' if filename.endswith('.png') else 'image/jpeg'
+            content_block = {'type': 'image', 'source': {'type': 'base64', 'media_type': mt, 'data': _b64.b64encode(file_data).decode()}}
+        for model in ['claude-haiku-4-5-20251001', 'claude-sonnet-4-6']:
+            try:
+                payload = _json.dumps({
+                    'model': model, 'max_tokens': 1024,
+                    'system': _BILL_SYSTEM_PROMPT,
+                    'messages': [{'role': 'user', 'content': [content_block, {'type': 'text', 'text': user_prompt}]}]
+                }).encode()
+                req = _ur.Request('https://api.anthropic.com/v1/messages', data=payload,
+                    headers={'Content-Type': 'application/json', 'x-api-key': api_key, 'anthropic-version': '2023-06-01'})
+                with _ur.urlopen(req, timeout=30) as resp:
+                    r = _json.loads(resp.read())
+                raw = r['content'][0]['text']
+                if '```' in raw:
+                    raw = raw.split('```')[1]
+                    if raw.startswith('json'): raw = raw[4:]
+                parsed = _json.loads(raw.strip())
+                return jsonify({'status': 'ok', 'parsed': parsed, 'method': 'ai', 'model': model})
+            except Exception:
+                continue
+        return jsonify({'status': '0', 'message': 'AI could not read this bill. Try the free accountant template instead.'})
+
+
+def _parse_template_upload(data, filename, bill_type_hint=''):
+    """Parse accountant CSV or Excel template upload."""
+    import io, json as _json, csv as _csv
+    result = {'bill_type': bill_type_hint, 'supplier': 'Template upload',
+              'period_start': None, 'period_end': None, 'period_days': 30,
+              'confidence': 'high', 'notes': 'Parsed from accountant template'}
+    if filename.endswith('.csv'):
+        text = data.decode('utf-8-sig', errors='replace')
+        reader = list(_csv.DictReader(io.StringIO(text)))
+        if not reader:
+            raise ValueError('Empty CSV')
+        row = reader[0]  # first data row
+        def g(k): return float(row.get(k, 0) or 0)
+        result.update({
+            'site_name':       row.get('site_name', ''),
+            'period':          row.get('period', ''),
+            'elec_kwh':        g('elec_kwh'),
+            'gas_kwh':         g('gas_kwh'),
+            'water_m3':        g('water_m3'),
+            'waste_kg':        g('waste_landfill_kg'),
+            'recycled_kg':     g('waste_recycled_kg'),
+            'hotel_nights':    g('hotel_nights'),
+            'vehicle_km_petrol':  g('vehicle_km_petrol'),
+            'vehicle_km_electric':g('vehicle_km_electric'),
+            'flights_short_km':   g('flights_short_km'),
+            'rail_km':            g('rail_km'),
+            'food_meat_spend_gbp':g('food_meat_spend_gbp'),
+            'all_rows':        reader,  # for multi-site
+        })
+    else:
+        raise ValueError('Excel upload: save as CSV first')
+    return result
+
+
+# ── Accountant template download ──────────────────────────────────────────────
+@app.route('/api/bill-template', methods=['GET'])
+@require_auth
+def api_bill_template():
+    """Download the accountant CSV template."""
+    import io, csv as _csv
+    from flask import Response
+    output = io.StringIO()
+    writer = _csv.writer(output)
+    writer.writerow([
+        'period', 'site_name', 'elec_kwh', 'gas_kwh', 'water_m3',
+        'waste_landfill_kg', 'waste_recycled_kg', 'food_meat_spend_gbp',
+        'hotel_nights', 'vehicle_km_petrol', 'vehicle_km_electric',
+        'flights_short_km', 'rail_km'
+    ])
+    writer.writerow([
+        '2026-07', 'Main Office', '2000', '1200', '18.5',
+        '120', '80', '350', '8', '2400', '0', '2000', '3000'
+    ])
+    writer.writerow([
+        '2026-07', 'Branch Store', '800', '400', '6.0',
+        '40', '30', '0', '0', '0', '0', '0', '500'
+    ])
+    csv_bytes = output.getvalue().encode('utf-8-sig')
+    return Response(
+        csv_bytes,
+        mimetype='text/csv',
+        headers={'Content-Disposition': 'attachment; filename="inocarbon_monthly_template.csv"'}
+    )
+
+
+# ── Confirmation file download (CSV) ─────────────────────────────────────────
+@app.route('/api/confirmation-csv', methods=['POST'])
+@require_auth
+def api_confirmation_csv():
+    """Generate a downloadable confirmation CSV from extracted bill data."""
+    import io, csv as _csv, json as _json
+    from flask import Response
+    body = request.get_json(silent=True) or {}
+    rows  = body.get('rows', [])
+    output = io.StringIO()
+    writer = _csv.writer(output)
+    writer.writerow(['source', 'period', 'field', 'value', 'unit', 'confidence', 'verified', 'timestamp'])
+    import datetime
+    ts = datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
+    for r in rows:
+        writer.writerow([
+            r.get('source',''), r.get('period',''), r.get('field',''),
+            r.get('value',''), r.get('unit',''), r.get('confidence',''),
+            r.get('verified', False), ts
+        ])
+    return Response(
+        output.getvalue().encode('utf-8-sig'),
+        mimetype='text/csv',
+        headers={'Content-Disposition': 'attachment; filename="inocarbon_confirmation.csv"'}
+    )
+
+
+# ── Multi-site calculate ──────────────────────────────────────────────────────
+@app.route('/api/calculate-multisite', methods=['POST'])
+@require_auth
+def api_calculate_multisite():
+    """Calculate emissions for multiple sites and return per-site + group totals."""
+    import json as _json
+    body  = request.get_json(silent=True) or {}
+    sites = body.get('sites', [])
+    if not sites:
+        return jsonify({'status': '0', 'message': 'No sites provided'})
+
+    site_results = []
+    group_total_kg = 0.0
+    group_scope1 = group_scope2 = group_scope3 = 0.0
+    group_employees = 0
+
+    for site in sites:
+        # Reuse the existing calculate logic by making an internal call
+        with app.test_request_context(
+            '/api/calculate', method='POST',
+            content_type='application/json',
+            data=_json.dumps(site)
+        ):
+            # Call calculate logic directly
+            resp = api_calculate()
+            if hasattr(resp, 'get_json'):
+                d = resp.get_json()
+            else:
+                d = _json.loads(resp.get_data())
+
+        if d.get('status') != 'ok':
+            site_results.append({'site_name': site.get('site_name', 'Site'), 'error': d.get('message', 'Error')})
+            continue
+
+        m = d['monthly']
+        biz = d.get('business', {})
+        site_results.append({
+            'site_name':      site.get('site_name', f'Site {len(site_results)+1}'),
+            'site_type':      site.get('site_type', 'office'),
+            'total_kg':       m['total_kg'],
+            'scope_1_kg':     m['scope_1_kg'],
+            'scope_2_kg':     m['scope_2_kg'],
+            'scope_3_kg':     m['scope_3_kg'],
+            'per_employee_kg': biz.get('per_employee_kg'),
+            'num_employees':  site.get('num_employees', site.get('occupants', 1)),
+            'wfh_pct':        site.get('wfh_pct', 0),
+            'wfh_total_extra_kg': biz.get('wfh_total_extra_kg', 0),
+        })
+        group_total_kg += m['total_kg']
+        group_scope1   += m['scope_1_kg']
+        group_scope2   += m['scope_2_kg']
+        group_scope3   += m['scope_3_kg']
+        group_employees += site.get('num_employees', site.get('occupants', 1))
+
+    # Find largest site
+    valid = [s for s in site_results if 'error' not in s]
+    largest = max(valid, key=lambda s: s['total_kg']) if valid else None
+
+    return jsonify({
+        'status': 'ok',
+        'sites': site_results,
+        'group': {
+            'total_kg':       round(group_total_kg, 1),
+            'annual_kg':      round(group_total_kg * 12, 0),
+            'scope_1_kg':     round(group_scope1, 1),
+            'scope_2_kg':     round(group_scope2, 1),
+            'scope_3_kg':     round(group_scope3, 1),
+            'num_sites':      len(valid),
+            'total_employees':group_employees,
+            'per_employee_kg':round(group_total_kg / max(group_employees,1), 1),
+            'largest_site':   largest['site_name'] if largest else None,
+            'largest_kg':     largest['total_kg'] if largest else None,
+        }
+    })
 
 
 if __name__ == '__main__':
