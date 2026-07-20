@@ -1,0 +1,49 @@
+# --- Secrets / environment (never commit these) ---
+.env
+.env.local
+.env.*.local
+*.key
+secrets.js
+secrets.json
+ 
+
+# --- OS junk ---
+.DS_Store
+Thumbs.db
+desktop.ini
+ 
+# --- Editor / IDE ---
+.vscode/
+.idea/
+*.swp
+ 
+# --- Python (i-NoCarbon, Flask apps) ---
+__pycache__/
+*.pyc
+*.pyo
+venv/
+env/
+.venv/
+*.egg-info/
+instance/
+*.sqlite3
+*.db
+ 
+# --- Node (if any build tooling is used) ---
+node_modules/
+npm-debug.log*
+yarn-error.log*
+package-lock.json.bak
+ 
+# --- Build / output ---
+dist/
+build/
+*.log
+ 
+# --- Claude Code local state ---
+.claude/
+ 
+# --- Misc local test/scratch files ---
+*.bak
+*.tmp
+scratch/
