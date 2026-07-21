@@ -1,0 +1,29 @@
+Copyright (c) 2026 Vijay L Narasimhan
+All Rights Reserved
+
+This repository and all its contents — including but not limited to source
+code, application logic, scoring/assessment methodologies, design assets, and
+documentation — are the original work of Vijay L Narasimhan.
+
+Permission is granted to view and interact with the hosted demo applications
+in this repository for personal, non-commercial evaluation purposes only.
+
+No permission is granted to:
+- Copy, reproduce, or redistribute the source code, in whole or in part
+- Modify or create derivative works based on this code or its underlying
+  methodologies
+- Use this code or methodology for commercial purposes
+- Sublicense, sell, or otherwise transfer any rights in this work
+
+without the express prior written consent of the copyright holder.
+
+The methodologies described in each tool's METHODOLOGY.md represent original
+frameworks and applied models developed by the copyright holder. Where a tool
+builds upon a publicly established strategic framework, this is credited
+explicitly in that document; such credit does not constitute a grant of rights
+to the original work presented here.
+
+All rights not expressly granted are reserved.
+
+For permissions, licensing inquiries, or collaboration requests, please
+contact the repository owner directly.
