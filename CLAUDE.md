@@ -13,8 +13,8 @@ for consistency across the portfolio.
 ## Repo structure convention
 
 - **Root** — only the live app file(s) (e.g. `index.html`), `README.md`,
-  `METHODOLOGY.md`, `LICENSE`, `.gitignore`. Keep root clean; nothing else
-  belongs there.
+  `METHODOLOGY.md`, `LICENSE`, `.gitignore`, `CHANGELOG.md` (if the repo
+  tracks one). Keep root clean; nothing else belongs there.
 - **`docs/`** — user guides, admin guides, reference guides, and any
   supporting documentation not needed to run the app.
 - **`archive/`** — superseded versions, old HTML/app snapshots, deprecated
@@ -75,6 +75,33 @@ are my own — see `METHODOLOGY.md` for the original framework.
 7. **Flag, don't silently fix, anything that looks like real personal
    data, credentials, or PII** in any file being touched — stop and ask
    before proceeding, even if it seems like test data.
+
+## Working alongside direct edits to main
+
+The repo owner sometimes edits `main` directly (via GitHub's web editor or
+a local clone) rather than routing every change through a PR — this is a
+legitimate, normal part of the workflow, not something to avoid or work
+around. Because of this, Claude Code sessions must actively guard against
+branch divergence rather than assuming `main` is static:
+
+1. **At the start of every session**, before any work, pull latest `main`
+   and briefly confirm whether it has moved since Claude Code last touched
+   this repo.
+2. **Never let a working branch live longer than one discrete fix/task.**
+   Complete one piece of work, get it reviewed and merged, then start the
+   next piece from a freshly-pulled `main` — don't accumulate multiple
+   unrelated fixes on one long-lived branch. The longer a branch stays
+   open, the more likely it silently diverges from direct edits landing on
+   `main` in the meantime, and the more entangled the eventual
+   reconciliation becomes.
+3. **Before starting a new task within the same session**, always re-pull
+   `main` first, even if it was checked recently — don't assume it's still
+   where it was 20 minutes ago.
+4. **If `main` has changed in ways that touch the same functions/lines
+   being worked on**, stop and flag it immediately with a clear diff of
+   what changed, rather than discovering it at merge time. Assess what's
+   genuinely good to adopt from the direct changes (fixes, improvements)
+   separately from what needs reconciling with in-progress work.
 
 ## Known environment quirks
 
